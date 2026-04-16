@@ -6,10 +6,6 @@ This note is organized as a technical reference for memory management in `xv6-ri
 - Branch-specific modifications in this repository.
 - Custom extensions that simulate policy rather than implementing full demand-paging or swapping.
 
-Fork repository:
-
-- [ob22a/xv6-riscv](https://github.com/ob22a/xv6-riscv)
-
 ## Table of Contents
 
 - [Overview of xv6 Memory System](#overview-of-xv6-memory-system)
