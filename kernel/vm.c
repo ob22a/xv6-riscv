@@ -216,6 +216,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
+  int pages = 0;
   char *mem;
   uint64 a;
 
@@ -235,7 +236,9 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
+    pages++;
   }
+  myproc()->pages_used+=pages;
   return newsz;
 }
 
@@ -252,6 +255,13 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
     uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+  }
+
+  int pages_removed = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE; // Always decimal due to PGROUNDUP AND PGROUNDDOWN
+  myproc()->pages_used -= pages_removed;
+
+  if (myproc()->pages_used<0){
+    panic("pages_used corrupted");
   }
 
   return newsz;

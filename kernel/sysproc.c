@@ -107,3 +107,7 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+// Custom system call to track memory usage
+uint64 sys_getmemusage(void) {
+  return myproc()->pages_used;
+}
