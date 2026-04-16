@@ -8,6 +8,22 @@
 #include "proc.h"
 #include "fs.h"
 
+// For FIFO page replacement simulation
+#define MAX_PAGES 10000
+#define MAX_TRACKED_PAGES 50
+
+struct page_info{
+  int pid;
+  uint64 va;
+  int used;
+  int order;
+};
+
+struct page_info page_table[MAX_PAGES]; // This page table is for scheduling 
+int page_count = 0;
+
+void fifo_evict();
+
 /*
  * the kernel's page table.
  */
@@ -236,6 +252,22 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
+
+    struct proc *p = myproc(); // Get the current process
+    if(p != 0){
+      page_table[page_count].pid = p->pid;
+      page_table[page_count].va = a;
+      page_table[page_count].used = 1;
+      page_table[page_count].order = page_count; // FIFO order
+      page_count++;
+
+      if(page_count > MAX_TRACKED_PAGES){
+        fifo_evict();
+      }
+
+      printf("TRACK: pid %d va %p total %d\n", p->pid, (void*)a, page_count);
+    }
+
     pages++;
   }
   myproc()->pages_used+=pages;
@@ -493,4 +525,26 @@ ismapped(pagetable_t pagetable, uint64 va)
     return 1;
   }
   return 0;
+}
+
+void fifo_evict(){
+  int oldest_index = -1;
+  int oldest_order = 1e9;
+
+  for(int i = 0; i < page_count; i++){
+    if(page_table[i].used && page_table[i].order < oldest_order){
+      oldest_order = page_table[i].order;
+      oldest_index = i;
+    }
+  }
+
+  if(oldest_index != -1){
+    printf("EVICT: pid %d va %p order %d\n",
+      page_table[oldest_index].pid,
+      (void*)page_table[oldest_index].va,
+      page_table[oldest_index].order
+    );
+
+    page_table[oldest_index].used = 0;
+  }
 }
