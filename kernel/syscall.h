@@ -21,5 +21,3 @@
 #define SYS_mkdir  20
 #define SYS_close  21
 #define SYS_getmemusage 22 // Custom memory tracker id
-#define SYS_memtrace 23
-#define SYS_memlogread 24

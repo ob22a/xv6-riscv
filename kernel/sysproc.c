@@ -111,25 +111,3 @@ sys_uptime(void)
 uint64 sys_getmemusage(void) {
   return myproc()->pages_used;
 }
-
-uint64
-sys_memtrace(void)
-{
-  int on;
-  argint(0, &on);
-  memlog_enable(on);
-  return 0;
-}
-
-uint64
-sys_memlogread(void)
-{
-  uint64 dst;
-  int max;
-  int clear_after_read;
-
-  argaddr(0, &dst);
-  argint(1, &max);
-  argint(2, &clear_after_read);
-  return memlog_read_user(dst, max, clear_after_read);
-}

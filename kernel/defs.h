@@ -22,15 +22,6 @@ void            consoleinit(void);
 void            consoleintr(int);
 void            consputc(int);
 
-// memlog.c
-void            memlog_init(void);
-void            memlog_enable(int);
-int             memlog_is_enabled(void);
-void            memlog_log_alloc(int, uint64, int, const char *);
-void            memlog_log_free(int, uint64, uint64, int);
-void            memlog_log_fifo_evict(int, uint64, uint64);
-int             memlog_read_user(uint64, int, int);
-
 // exec.c
 int             kexec(char*, char**);
 

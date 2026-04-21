@@ -568,7 +568,6 @@ Code mapping:
 - `kernel/proc.c` -> `allocproc()`, `freeproc()`, `kfork()`
 - `kernel/vm.c` -> `uvmalloc()`, `uvmdealloc()`, `vmfault()`
 - `kernel/sysproc.c` -> `sys_getmemusage()`
-- `kernel/memlog.c` -> memory-event logging buffer
 - `kernel/syscall.c` -> syscall dispatch entry
 - `kernel/syscall.h` -> `SYS_getmemusage`
 - `user/usys.pl` -> `entry("getmemusage")`
@@ -699,15 +698,6 @@ parent: 1
 - after `sbrklazy(4096)`, count should not increase yet
 - after touching the lazy page, `vmfault()` allocates it and count increases
 
-### Kernel memory log
-
-To avoid console spam, memory instrumentation events are written to a kernel ring buffer instead of printing directly:
-
-- `kernel/memlog.c` stores allocation/free/FIFO events
-- `memtrace(0|1)` enables/disables logging at runtime
-- `memlogread(buf, max, clear)` exports log data to user space
-- `user/memlogdump.c` writes the captured log to `memlog.txt`
-
 ## Custom Extension: Page Replacement Simulation
 
 This section is a **simulation**, not real xv6 swapping or real page replacement.
@@ -756,7 +746,7 @@ fifo_evict_oldest_locked(void)
   struct fifo_node *victim = fifo_state.head;
   if(victim == 0)
     return;
-  memlog_log_fifo_evict(victim->pid, victim->va, victim->seq);
+  printf("EVICT: pid %d va %p seq %d\n", victim->pid, (void*)victim->va, (int)victim->seq);
   fifo_remove_node(victim);
 }
 ```
@@ -765,7 +755,7 @@ Interpretation:
 
 - `seq` records insertion order.
 - FIFO victim is always the queue head.
-- Eviction updates simulation metadata and writes an event to memlog.
+- Eviction updates simulation metadata and prints the victim to console.
 
 ### Where tracking is attached
 
@@ -808,17 +798,14 @@ This branch does not attempt that full mechanism. It only simulates the decision
 ### Custom-extension files in this branch
 
 - [`kernel/vm.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/vm.c) -> FIFO queue simulation (`fifo_track_page()`, `fifo_remove_range()`, `fifo_remove_pid()`), `vmfault()`, `ismapped()`, tracking additions in `uvmalloc()` and `uvmdealloc()`
-- [`kernel/memlog.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/memlog.c) -> kernel ring buffer for memory instrumentation
 - [`kernel/proc.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/proc.h) -> `pages_used`
 - [`kernel/proc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/proc.c) -> initialization/copy/reset of `pages_used`
 - [`kernel/exec.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/exec.c) -> reset of `pages_used` after successful `exec`
-- [`kernel/sysproc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/sysproc.c) -> `sys_getmemusage()`, `sys_memtrace()`, `sys_memlogread()`, extended `sys_sbrk()`
-- [`kernel/syscall.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.c) / [`kernel/syscall.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.h) -> syscall registration (`getmemusage`, `memtrace`, `memlogread`)
+- [`kernel/sysproc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/sysproc.c) -> `sys_getmemusage()`, extended `sys_sbrk()`
+- [`kernel/syscall.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.c) / [`kernel/syscall.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.h) -> syscall registration (`getmemusage`)
 - [`user/usys.pl`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/usys.pl) / [`user/user.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/user.h) -> user wrapper exposure
 - [`user/getmemtest.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/getmemtest.c) -> memtracker test including eager + lazy page allocation
 - [`user/fifotest.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/fifotest.c) -> test program for the FIFO page-replacement simulation
-- [`user/memtrace.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/memtrace.c) -> runtime switch for memlog verbosity
-- [`user/memlogdump.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/memlogdump.c) -> dumps kernel memlog to `memlog.txt`
 
 ## Build and Related Notes
 

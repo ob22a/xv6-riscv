@@ -28,6 +28,7 @@ struct {
   struct fifo_node *head;
   struct fifo_node *tail;
   uint64 next_seq;
+  int tracked_pages;
 } fifo_state;
 
 static void fifo_init_once(void);
@@ -35,6 +36,7 @@ static void fifo_remove_node(struct fifo_node *n);
 static void fifo_evict_oldest_locked(void);
 static void fifo_track_page(int pid, uint64 va);
 static void fifo_remove_range(int pid, uint64 va_start, uint64 va_end);
+static int fifo_tracked_pages(void);
 
 /*
  * the kernel's page table.
@@ -56,6 +58,7 @@ fifo_init_once(void)
   fifo_state.head = 0;
   fifo_state.tail = 0;
   fifo_state.next_seq = 1;
+  fifo_state.tracked_pages = 0;
   for(int i = 0; i < MAX_TRACKED_PAGES; i++){
     fifo_state.nodes[i].free_next = fifo_state.free;
     fifo_state.free = &fifo_state.nodes[i];
@@ -80,15 +83,19 @@ fifo_remove_node(struct fifo_node *n)
   n->next = 0;
   n->free_next = fifo_state.free;
   fifo_state.free = n;
+  if(fifo_state.tracked_pages > 0)
+    fifo_state.tracked_pages--;
 }
 
 static void
 fifo_evict_oldest_locked(void)
 {
   struct fifo_node *victim = fifo_state.head;
+  int before = fifo_state.tracked_pages;
   if(victim == 0)
     return;
-  memlog_log_fifo_evict(victim->pid, victim->va, victim->seq);
+  printf("EVICT: pid %d va %p seq %d tracked %d/%d\n",
+    victim->pid, (void*)victim->va, (int)victim->seq, before, MAX_TRACKED_PAGES);
   fifo_remove_node(victim);
 }
 
@@ -121,6 +128,7 @@ fifo_track_page(int pid, uint64 va)
   else
     fifo_state.head = n;
   fifo_state.tail = n;
+  fifo_state.tracked_pages++;
   release(&fifo_state.lock);
 }
 
@@ -144,6 +152,7 @@ void
 fifo_remove_pid(int pid)
 {
   struct fifo_node *cur, *next;
+  int removed = 0;
 
   fifo_init_once();
   acquire(&fifo_state.lock);
@@ -151,9 +160,26 @@ fifo_remove_pid(int pid)
     next = cur->next;
     if(cur->pid == pid){
       fifo_remove_node(cur);
+      removed++;
     }
   }
+  int remaining = fifo_state.tracked_pages;
   release(&fifo_state.lock);
+  if(removed > 0){
+    printf("FIFO_REMOVE_PID: pid %d removed %d tracked %d/%d\n",
+      pid, removed, remaining, MAX_TRACKED_PAGES);
+  }
+}
+
+static int
+fifo_tracked_pages(void)
+{
+  int n;
+  fifo_init_once();
+  acquire(&fifo_state.lock);
+  n = fifo_state.tracked_pages;
+  release(&fifo_state.lock);
+  return n;
 }
 
 // Make a direct-map page table for the kernel.
@@ -380,7 +406,8 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
     if(p != 0){
       p->pages_used++;
       fifo_track_page(p->pid, a);
-      memlog_log_alloc(p->pid, a, p->pages_used, "uvmalloc");
+      printf("TRACK: uvmalloc pid %d va %p pages %d tracked %d/%d\n",
+        p->pid, (void*)a, p->pages_used, fifo_tracked_pages(), MAX_TRACKED_PAGES);
     }
   }
   return newsz;
@@ -415,7 +442,8 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     if (p->pages_used < 0){
       panic("pages_used corrupted");
     }
-    memlog_log_free(p->pid, va_start, va_end, p->pages_used);
+    printf("FREE: pid %d range [%p,%p) pages %d tracked %d/%d\n",
+      p->pid, (void*)va_start, (void*)va_end, p->pages_used, fifo_tracked_pages(), MAX_TRACKED_PAGES);
   }
 
   return newsz;
@@ -635,7 +663,8 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   }
   p->pages_used++;
   fifo_track_page(p->pid, va);
-  memlog_log_alloc(p->pid, va, p->pages_used, "vmfault");
+  printf("TRACK: vmfault pid %d va %p pages %d tracked %d/%d\n",
+    p->pid, (void*)va, p->pages_used, fifo_tracked_pages(), MAX_TRACKED_PAGES);
   return mem;
 }
 

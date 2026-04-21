@@ -25,8 +25,6 @@ char* sys_sbrk(int,int);
 int pause(int);
 int uptime(void);
 int getmemusage(void);
-int memtrace(int);
-int memlogread(char *buf, int max, int clear_after_read);
 
 // ulib.c
 int stat(const char*, struct stat*);

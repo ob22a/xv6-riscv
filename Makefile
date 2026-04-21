@@ -5,7 +5,6 @@ OBJS = \
   $K/entry.o \
   $K/start.o \
   $K/console.o \
-  $K/memlog.o \
   $K/printf.o \
   $K/uart.o \
   $K/kalloc.o \
@@ -148,8 +147,6 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_getmemtest\
 	$U/_fifotest\
-	$U/_memlogdump\
-	$U/_memtrace\
 
 fs.img: mkfs/mkfs README.md $(UPROGS)
 	mkfs/mkfs fs.img README.md $(UPROGS)
