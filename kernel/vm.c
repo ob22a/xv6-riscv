@@ -8,21 +8,33 @@
 #include "proc.h"
 #include "fs.h"
 
-// For FIFO page replacement simulation
-#define MAX_PAGES 10000
+// FIFO simulation tracks resident pages in a small queue.
 #define MAX_TRACKED_PAGES 50
 
-struct page_info{
+struct fifo_node {
   int pid;
   uint64 va;
-  int used;
-  int order;
+  uint64 seq;
+  struct fifo_node *prev;
+  struct fifo_node *next;
+  struct fifo_node *free_next;
 };
 
-struct page_info page_table[MAX_PAGES]; // This page table is for scheduling 
-int page_count = 0;
+struct {
+  struct spinlock lock;
+  int initialized;
+  struct fifo_node nodes[MAX_TRACKED_PAGES];
+  struct fifo_node *free;
+  struct fifo_node *head;
+  struct fifo_node *tail;
+  uint64 next_seq;
+} fifo_state;
 
-void fifo_evict();
+static void fifo_init_once(void);
+static void fifo_remove_node(struct fifo_node *n);
+static void fifo_evict_oldest_locked(void);
+static void fifo_track_page(int pid, uint64 va);
+static void fifo_remove_range(int pid, uint64 va_start, uint64 va_end);
 
 /*
  * the kernel's page table.
@@ -32,6 +44,117 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+static void
+fifo_init_once(void)
+{
+  if(fifo_state.initialized)
+    return;
+
+  initlock(&fifo_state.lock, "fifo_sim");
+  fifo_state.free = 0;
+  fifo_state.head = 0;
+  fifo_state.tail = 0;
+  fifo_state.next_seq = 1;
+  for(int i = 0; i < MAX_TRACKED_PAGES; i++){
+    fifo_state.nodes[i].free_next = fifo_state.free;
+    fifo_state.free = &fifo_state.nodes[i];
+  }
+  fifo_state.initialized = 1;
+}
+
+static void
+fifo_remove_node(struct fifo_node *n)
+{
+  if(n->prev)
+    n->prev->next = n->next;
+  else
+    fifo_state.head = n->next;
+
+  if(n->next)
+    n->next->prev = n->prev;
+  else
+    fifo_state.tail = n->prev;
+
+  n->prev = 0;
+  n->next = 0;
+  n->free_next = fifo_state.free;
+  fifo_state.free = n;
+}
+
+static void
+fifo_evict_oldest_locked(void)
+{
+  struct fifo_node *victim = fifo_state.head;
+  if(victim == 0)
+    return;
+  memlog_log_fifo_evict(victim->pid, victim->va, victim->seq);
+  fifo_remove_node(victim);
+}
+
+static void
+fifo_track_page(int pid, uint64 va)
+{
+  struct fifo_node *n;
+
+  fifo_init_once();
+  acquire(&fifo_state.lock);
+  if(fifo_state.free == 0){
+    fifo_evict_oldest_locked();
+  }
+  if(fifo_state.free == 0){
+    release(&fifo_state.lock);
+    return;
+  }
+
+  n = fifo_state.free;
+  fifo_state.free = n->free_next;
+  n->free_next = 0;
+  n->pid = pid;
+  n->va = va;
+  n->seq = fifo_state.next_seq++;
+  n->prev = fifo_state.tail;
+  n->next = 0;
+
+  if(fifo_state.tail)
+    fifo_state.tail->next = n;
+  else
+    fifo_state.head = n;
+  fifo_state.tail = n;
+  release(&fifo_state.lock);
+}
+
+static void
+fifo_remove_range(int pid, uint64 va_start, uint64 va_end)
+{
+  struct fifo_node *cur, *next;
+
+  fifo_init_once();
+  acquire(&fifo_state.lock);
+  for(cur = fifo_state.head; cur; cur = next){
+    next = cur->next;
+    if(cur->pid == pid && cur->va >= va_start && cur->va < va_end){
+      fifo_remove_node(cur);
+    }
+  }
+  release(&fifo_state.lock);
+}
+
+void
+fifo_remove_pid(int pid)
+{
+  struct fifo_node *cur, *next;
+
+  fifo_init_once();
+  acquire(&fifo_state.lock);
+  for(cur = fifo_state.head; cur; cur = next){
+    next = cur->next;
+    if(cur->pid == pid){
+      fifo_remove_node(cur);
+    }
+  }
+  release(&fifo_state.lock);
+}
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -81,6 +204,7 @@ kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 void
 kvminit(void)
 {
+  fifo_init_once();
   kernel_pagetable = kvmmake();
 }
 
@@ -232,7 +356,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
-  int pages = 0;
+  struct proc *p = myproc();
   char *mem;
   uint64 a;
 
@@ -253,24 +377,12 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
       return 0;
     }
 
-    struct proc *p = myproc(); // Get the current process
     if(p != 0){
-      page_table[page_count].pid = p->pid;
-      page_table[page_count].va = a;
-      page_table[page_count].used = 1;
-      page_table[page_count].order = page_count; // FIFO order
-      page_count++;
-
-      if(page_count > MAX_TRACKED_PAGES){
-        fifo_evict();
-      }
-
-      printf("TRACK: pid %d va %p total %d\n", p->pid, (void*)a, page_count);
+      p->pages_used++;
+      fifo_track_page(p->pid, a);
+      memlog_log_alloc(p->pid, a, p->pages_used, "uvmalloc");
     }
-
-    pages++;
   }
-  myproc()->pages_used+=pages;
   return newsz;
 }
 
@@ -281,19 +393,29 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 uint64
 uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
+  struct proc *p = myproc();
+  uint64 va_start = PGROUNDUP(newsz);
+  uint64 va_end = PGROUNDUP(oldsz);
+
   if(newsz >= oldsz)
     return oldsz;
 
-  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
-    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+  if(va_start < va_end){
+    int npages = (va_end - va_start) / PGSIZE;
+    uvmunmap(pagetable, va_start, npages, 1);
+    if(p != 0){
+      fifo_remove_range(p->pid, va_start, va_end);
+    }
   }
 
-  int pages_removed = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE; // Always decimal due to PGROUNDUP AND PGROUNDDOWN
-  myproc()->pages_used -= pages_removed;
+  int pages_removed = (va_end - va_start) / PGSIZE;
+  if(p != 0){
+    p->pages_used -= pages_removed;
 
-  if (myproc()->pages_used<0){
-    panic("pages_used corrupted");
+    if (p->pages_used < 0){
+      panic("pages_used corrupted");
+    }
+    memlog_log_free(p->pid, va_start, va_end, p->pages_used);
   }
 
   return newsz;
@@ -511,6 +633,9 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     kfree((void *)mem);
     return 0;
   }
+  p->pages_used++;
+  fifo_track_page(p->pid, va);
+  memlog_log_alloc(p->pid, va, p->pages_used, "vmfault");
   return mem;
 }
 
@@ -525,26 +650,4 @@ ismapped(pagetable_t pagetable, uint64 va)
     return 1;
   }
   return 0;
-}
-
-void fifo_evict(){
-  int oldest_index = -1;
-  int oldest_order = 1e9;
-
-  for(int i = 0; i < page_count; i++){
-    if(page_table[i].used && page_table[i].order < oldest_order){
-      oldest_order = page_table[i].order;
-      oldest_index = i;
-    }
-  }
-
-  if(oldest_index != -1){
-    printf("EVICT: pid %d va %p order %d\n",
-      page_table[oldest_index].pid,
-      (void*)page_table[oldest_index].va,
-      page_table[oldest_index].order
-    );
-
-    page_table[oldest_index].used = 0;
-  }
 }

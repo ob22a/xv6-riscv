@@ -560,14 +560,15 @@ This section describes branch-specific tracking logic added on top of xv6. It is
 
 ### Purpose
 
-The extension counts user pages allocated to each process through the tracked `uvmalloc()` path and exposes the count through a system call.
+The extension counts resident user pages (pages that currently have physical backing) per process and exposes the count through a system call.
 
 Code mapping:
 
 - `kernel/proc.h` -> `struct proc { int pages_used; }`
 - `kernel/proc.c` -> `allocproc()`, `freeproc()`, `kfork()`
-- `kernel/vm.c` -> `uvmalloc()`, `uvmdealloc()`
+- `kernel/vm.c` -> `uvmalloc()`, `uvmdealloc()`, `vmfault()`
 - `kernel/sysproc.c` -> `sys_getmemusage()`
+- `kernel/memlog.c` -> memory-event logging buffer
 - `kernel/syscall.c` -> syscall dispatch entry
 - `kernel/syscall.h` -> `SYS_getmemusage`
 - `user/usys.pl` -> `entry("getmemusage")`
@@ -588,11 +589,11 @@ That last reset is a design choice in this branch: it excludes the pages used to
 
 ### Allocation-side accounting
 
-The note's implementation logic is:
+The implementation logic is:
 
-- `kernel/vm.c -> uvmalloc()` counts the number of pages allocated in the current call
-- after successful allocation, it adds that number to `myproc()->pages_used`
-- this means the counter reflects eager `uvmalloc()` growth and `exec()`-time allocations before the explicit reset in `kexec()`, but not pages created later by `vmfault()`
+- `kernel/vm.c -> uvmalloc()` increments `myproc()->pages_used` when it allocates and maps a user page
+- `kernel/vm.c -> vmfault()` increments `myproc()->pages_used` when lazy allocation materializes a page on first access
+- `kernel/vm.c -> uvmdealloc()` decrements `myproc()->pages_used` by the number of unmapped pages
 
 Deallocation-side accounting:
 
@@ -682,7 +683,7 @@ int main()
 }
 ```
 
-Observed output:
+Observed output example:
 
 ```text
 Pages used at the start: 0
@@ -693,9 +694,19 @@ child: 1
 parent: 1
 ```
 
-### Pitfall
+`getmemtest` now also checks the lazy-allocation path:
 
-Because this branch also has lazy allocation support, the exact interpretation of `pages_used` depends on which allocation path is used. The current tracking logic is tied to `uvmalloc()` and `uvmdealloc()`; pages allocated through `vmfault()` are not added to `pages_used` by the current implementation, so the counter does not represent total resident user pages under the lazy-allocation path.
+- after `sbrklazy(4096)`, count should not increase yet
+- after touching the lazy page, `vmfault()` allocates it and count increases
+
+### Kernel memory log
+
+To avoid console spam, memory instrumentation events are written to a kernel ring buffer instead of printing directly:
+
+- `kernel/memlog.c` stores allocation/free/FIFO events
+- `memtrace(0|1)` enables/disables logging at runtime
+- `memlogread(buf, max, clear)` exports log data to user space
+- `user/memlogdump.c` writes the captured log to `memlog.txt`
 
 ## Custom Extension: Page Replacement Simulation
 
@@ -717,77 +728,58 @@ It is therefore best described as a **page-replacement simulation** attached to 
 The custom state is placed in `kernel/vm.c`:
 
 ```c
-// For page replacement simulation algorithms
-#define MAX_PAGES 10000
 #define MAX_TRACKED_PAGES 50
 
-struct page_info{
+struct fifo_node {
   int pid;
   uint64 va;
-  int used;
-  int order;
+  uint64 seq;
+  struct fifo_node *prev;
+  struct fifo_node *next;
+  struct fifo_node *free_next;
 };
-
-struct page_info page_table[MAX_PAGES]; // This page table is for scheduling 
-int page_count = 0;
-
-void fifo_evict(); // declare function and its return type
 ```
 
 Important clarification:
 
-- This `page_table` array is **not** the hardware page table used by Sv39 translation.
-- It is custom metadata used by the simulation.
+- This queue state is **not** the hardware page table used by Sv39 translation.
+- It is custom metadata used by the FIFO simulation.
 
 ### FIFO policy logic
 
-The FIFO victim-selection function is:
+The FIFO victim-selection operation is:
 
 ```c
-// New functions 
-void fifo_evict(){
-  int oldest_index = -1;
-  int oldest_order = 1e9;
-
-  for(int i = 0; i < page_count; i++){
-    if(page_table[i].used && page_table[i].order < oldest_order){
-      oldest_order = page_table[i].order;
-      oldest_index = i;
-    }
-  }
-
-  if(oldest_index != -1){
-    printf("EVICT: pid %d va %p order %d\n",
-      page_table[oldest_index].pid,
-      (void*)page_table[oldest_index].va,
-      page_table[oldest_index].order
-    );
-
-    page_table[oldest_index].used = 0;
-  }
+static void
+fifo_evict_oldest_locked(void)
+{
+  struct fifo_node *victim = fifo_state.head;
+  if(victim == 0)
+    return;
+  memlog_log_fifo_evict(victim->pid, victim->va, victim->seq);
+  fifo_remove_node(victim);
 }
 ```
 
 Interpretation:
 
-- `order` records insertion order.
-- The smallest active `order` is chosen as the oldest tracked page.
-- Eviction only clears the simulation's `used` bit and prints metadata.
+- `seq` records insertion order.
+- FIFO victim is always the queue head.
+- Eviction updates simulation metadata and writes an event to memlog.
 
 ### Where tracking is attached
 
-The tracking hook is currently inside `kernel/vm.c -> uvmalloc()`. For each newly allocated user page, the branch records:
+Tracking hooks are inside `kernel/vm.c -> uvmalloc()` and `kernel/vm.c -> vmfault()`. For each newly materialized user page, the branch enqueues:
 
 ```text
-page_table[page_count].pid = p->pid;
-page_table[page_count].va = a;
-page_table[page_count].used = 1;
-page_table[page_count].order = page_count;
+fifo_track_page(p->pid, a);
 ```
 
-And when the number of tracked pages exceeds the threshold:
+Cleanup hooks:
 
-- if `page_count > MAX_TRACKED_PAGES`, `fifo_evict()` is called
+- `uvmdealloc()` removes FIFO entries in unmapped ranges via `fifo_remove_range(...)`
+- `freeproc()` removes all entries for a terminated process via `fifo_remove_pid(pid)`
+- when no free node is available, FIFO evicts the head in O(1)
 
 ### Conceptual limitation
 
@@ -815,15 +807,18 @@ This branch does not attempt that full mechanism. It only simulates the decision
 
 ### Custom-extension files in this branch
 
-- [`kernel/vm.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/vm.c) -> `page_table`, `page_count`, `fifo_evict()`, `vmfault()`, `ismapped()`, tracking additions in `uvmalloc()` and `uvmdealloc()`
+- [`kernel/vm.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/vm.c) -> FIFO queue simulation (`fifo_track_page()`, `fifo_remove_range()`, `fifo_remove_pid()`), `vmfault()`, `ismapped()`, tracking additions in `uvmalloc()` and `uvmdealloc()`
+- [`kernel/memlog.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/memlog.c) -> kernel ring buffer for memory instrumentation
 - [`kernel/proc.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/proc.h) -> `pages_used`
 - [`kernel/proc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/proc.c) -> initialization/copy/reset of `pages_used`
 - [`kernel/exec.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/exec.c) -> reset of `pages_used` after successful `exec`
-- [`kernel/sysproc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/sysproc.c) -> `sys_getmemusage()`, extended `sys_sbrk()`
-- [`kernel/syscall.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.c) / [`kernel/syscall.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.h) -> syscall registration
+- [`kernel/sysproc.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/sysproc.c) -> `sys_getmemusage()`, `sys_memtrace()`, `sys_memlogread()`, extended `sys_sbrk()`
+- [`kernel/syscall.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.c) / [`kernel/syscall.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/kernel/syscall.h) -> syscall registration (`getmemusage`, `memtrace`, `memlogread`)
 - [`user/usys.pl`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/usys.pl) / [`user/user.h`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/user.h) -> user wrapper exposure
-- [`user/getmemtest.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/getmemtest.c) -> test for the memory tracker
+- [`user/getmemtest.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/getmemtest.c) -> memtracker test including eager + lazy page allocation
 - [`user/fifotest.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/fifotest.c) -> test program for the FIFO page-replacement simulation
+- [`user/memtrace.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/memtrace.c) -> runtime switch for memlog verbosity
+- [`user/memlogdump.c`](https://github.com/ob22a/xv6-riscv/blob/riscv/user/memlogdump.c) -> dumps kernel memlog to `memlog.txt`
 
 ## Build and Related Notes
 

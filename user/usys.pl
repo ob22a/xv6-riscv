@@ -42,4 +42,6 @@ entry("getpid");
 entry("sbrk");
 entry("pause");
 entry("uptime");
-entry("getmemusage")
+entry("getmemusage");
+entry("memtrace");
+entry("memlogread");

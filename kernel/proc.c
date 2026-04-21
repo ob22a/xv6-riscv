@@ -156,6 +156,8 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  if(p->pid > 0)
+    fifo_remove_pid(p->pid);
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;

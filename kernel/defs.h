@@ -22,6 +22,15 @@ void            consoleinit(void);
 void            consoleintr(int);
 void            consputc(int);
 
+// memlog.c
+void            memlog_init(void);
+void            memlog_enable(int);
+int             memlog_is_enabled(void);
+void            memlog_log_alloc(int, uint64, int, const char *);
+void            memlog_log_free(int, uint64, uint64, int);
+void            memlog_log_fifo_evict(int, uint64, uint64);
+int             memlog_read_user(uint64, int, int);
+
 // exec.c
 int             kexec(char*, char**);
 
@@ -169,6 +178,7 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
+void            fifo_remove_pid(int);
 
 // plic.c
 void            plicinit(void);
