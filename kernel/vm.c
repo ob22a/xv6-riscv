@@ -102,10 +102,17 @@ fifo_evict_oldest_locked(void)
 static void
 fifo_track_page(int pid, uint64 va)
 {
-  struct fifo_node *n;
+  struct fifo_node *n, *cur, *next;
 
   fifo_init_once();
   acquire(&fifo_state.lock);
+  // Keep at most one queue node per (pid, va).
+  for(cur = fifo_state.head; cur; cur = next){
+    next = cur->next;
+    if(cur->pid == pid && cur->va == va){
+      fifo_remove_node(cur);
+    }
+  }
   if(fifo_state.free == 0){
     fifo_evict_oldest_locked();
   }

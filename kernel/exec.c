@@ -133,6 +133,8 @@ kexec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
   p->trapframe->sp = sp; // initial stack pointer
+
+  fifo_remove_pid(p->pid); // drop stale entries associated with creating the process
   proc_freepagetable(oldpagetable, oldsz);
   p->pages_used=0;
 
